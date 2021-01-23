@@ -1,42 +1,37 @@
 use std::env;
+use std::time::Duration;
 
-use env_logger;
-use futures::stream::Stream;
-use futures::Future;
+use futures::StreamExt;
 use log::error;
+use telegram_bot::*;
 
-use telebot::bot;
-use telebot::functions::*;
-use telebot::objects as tbo;
-
-fn handle_update((tgbot, update): (bot::RequestHandle, tbo::Update)) -> Result<(), ()> {
-    if let tbo::Update {
-        message: Some(tbo::Message {
-            message_id,
-            chat: tbo::Chat { id: chat_id, .. },
-            new_chat_member: opt_new,
-            left_chat_member: opt_left,
-            ..
-        }),
-        ..
-    } = update {
-        if opt_new.is_some() || opt_left.is_some() {
-            tokio::spawn(tgbot.delete_message(chat_id, message_id).send()
-                .map(|_| ())
-                .map_err(|e| error!("{}", e)));
+async fn handle_message(api: &Api, message: Message) {
+    match message.kind {
+        MessageKind::NewChatMembers { .. } | MessageKind::LeftChatMember { .. } => {
+            tokio::spawn(api.send(message.delete()));
         }
+        _ => (),
     }
-    Ok(())
 }
 
-fn main() {
-    env_logger::init();
-    let bot = bot::Bot::new(&env::var("TELEGRAM_BOT_KEY").unwrap()).update_interval(200);
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt::init();
+    let bot_key = env::var("TELEGRAM_BOT_KEY").expect("specify bot key in TELEGRAM_BOT_KEY");
+    let api = Api::new(bot_key);
 
-    tokio::run(bot.resolve_name()
-        .map_err(|e| error!("{}", e))
-        .and_then(|name| bot
-            .get_stream(name)
-            .map_err(|e| error!("{}", e))
-            .for_each(handle_update)));
+    let mut stream = api.stream();
+    stream
+        .error_delay(Duration::from_secs(30))
+        .timeout(Duration::from_secs(35));
+    while let Some(update) = stream.next().await {
+        match update {
+            Ok(Update {
+                kind: UpdateKind::Message(message),
+                ..
+            }) => handle_message(&api, message).await,
+            Err(error) => error!("{:?}", error),
+            _ => (),
+        }
+    }
 }
